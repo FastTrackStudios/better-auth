@@ -12,6 +12,8 @@ pub mod password_management;
 pub mod session_management;
 pub mod two_factor;
 pub mod user_management;
+pub mod vox_rpc;
+pub mod nextcloud;
 
 use serde::{Deserialize, Serialize};
 
@@ -171,4 +173,9 @@ pub use session_management::SessionManagementPlugin;
 pub use two_factor::{TwoFactorConfig, TwoFactorPlugin};
 pub use user_management::{
     ChangeEmailConfig, DeleteUserConfig, UserManagementConfig, UserManagementPlugin,
+};
+pub use vox_rpc::{VoxRpcConfig, VoxRpcPlugin};
+pub use nextcloud::{
+    NextcloudProviderConfig, AutheliaProviderConfig,
+    nextcloud_provider, authelia_provider,
 };
