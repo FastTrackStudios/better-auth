@@ -10,27 +10,30 @@
 //! - `auth.sign_in` — Authenticate with email + password
 //! - `auth.sign_out` — Revoke current session
 //! - `auth.get_session` — Get current session + user info
-//! - `auth.refresh_session` — Refresh session token
 //! - `auth.list_sessions` — List all active sessions
 //! - `auth.revoke_session` — Revoke specific session
+//! - `auth.list_orgs` — List organizations for the current user
 //!
-//! ## Integration
+//! ## Vox Middleware
 //!
-//! The Vox RPC plugin works by:
-//! 1. Receiving RPC calls with session tokens in the method params
-//! 2. Delegating to the same SessionManager and database adapter
-//! 3. Returning structured Facet types (not JSON HTTP responses)
+//! When the `vox` feature is enabled, the plugin also provides
+//! [`VoxAuthMiddleware`] — a Vox `ServerMiddleware` that validates auth
+//! tokens from request metadata and injects `AuthenticatedUser` into the
+//! per-request extensions bag.
 //!
-//! This means the same auth logic runs for both HTTP and RPC clients.
+//! ```rust,ignore
+//! let auth = Arc::new(/* BetterAuth */);
+//! let middleware = VoxAuthMiddleware::new(auth.clone());
+//! let dispatcher = MyServiceDispatcher::new(service)
+//!     .with_middleware(middleware);
+//! ```
 
 use async_trait::async_trait;
 
 use better_auth_core::adapters::DatabaseAdapter;
-use better_auth_core::config::AuthConfig;
-use better_auth_core::entity::{AuthSession, AuthUser};
+use better_auth_core::entity::AuthUser;
 use better_auth_core::error::{AuthError, AuthResult};
 use better_auth_core::plugin::{AuthContext, AuthPlugin, AuthRoute};
-use better_auth_core::session::SessionManager;
 use better_auth_core::types::{AuthRequest, AuthResponse, HttpMethod};
 
 /// Vox RPC authentication plugin configuration.
@@ -105,51 +108,134 @@ impl<DB: DatabaseAdapter> AuthPlugin<DB> for VoxRpcPlugin {
     async fn on_request(
         &self,
         req: &AuthRequest,
-        ctx: &AuthContext<DB>,
+        _ctx: &AuthContext<DB>,
     ) -> AuthResult<Option<AuthResponse>> {
-        // Vox RPC requests come through the VoxAuthService, not HTTP.
-        // This handler is a fallback for HTTP clients that hit the /vox/* routes.
         let path = req.path();
-
         match path {
-            "/vox/sign-up" => {
-                // Delegate to email/password sign-up logic
-                // For now, return method not allowed — use the Vox service
-                Ok(Some(
-                    AuthResponse::json(405, &serde_json::json!({"error": "Use Vox RPC for this endpoint"}))
-                        .map_err(|e| AuthError::Internal(e.to_string()))?
-                ))
-            }
+            "/vox/sign-up" | "/vox/sign-in" | "/vox/sign-out" | "/vox/get-session" => Ok(Some(
+                AuthResponse::json(
+                    405,
+                    &serde_json::json!({"error": "Use Vox RPC for this endpoint"}),
+                )
+                .map_err(|e| AuthError::Internal(e.to_string()))?,
+            )),
             _ => Ok(None),
         }
     }
 }
 
-/// Vox RPC service trait for authentication.
+// ── Vox Server Middleware ───────────────────────────────────────────────────
+
+/// Authenticated user info injected into Vox request extensions.
 ///
-/// This trait is designed to be used with `#[vox::service]` in downstream
-/// crates that have both `vox` and `better-auth` as dependencies.
+/// Handlers can read this from `context.extensions().get_cloned::<AuthenticatedUser>()`
+/// to get the current user. If absent, the request is unauthenticated.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuthenticatedUser {
+    pub user_id: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub username: Option<String>,
+    pub role: Option<String>,
+    pub session_token: String,
+    pub active_organization_id: Option<String>,
+}
+
+/// Vox server middleware for better-auth authentication.
 ///
-/// Example implementation:
+/// Reads the `authorization` metadata key from incoming Vox requests,
+/// validates the session token via better-auth's `SessionManager`, and
+/// inserts an [`AuthenticatedUser`] into the request extensions.
+///
+/// # Usage
+///
 /// ```rust,ignore
-/// #[vox::service]
-/// pub trait VoxAuthService {
-///     async fn sign_up(&self, email: String, password: String, name: Option<String>)
-///         -> Result<AuthSessionResponse, String>;
-///     async fn sign_in(&self, email: String, password: String)
-///         -> Result<AuthSessionResponse, String>;
-///     async fn sign_out(&self, token: String) -> Result<(), String>;
-///     async fn get_session(&self, token: String)
-///         -> Result<AuthSessionResponse, String>;
-///     async fn list_sessions(&self, token: String)
-///         -> Result<Vec<SessionInfo>, String>;
-///     async fn revoke_session(&self, token: String, session_id: String)
-///         -> Result<(), String>;
-/// }
-/// ```
+/// use better_auth_api::plugins::vox_rpc::VoxAuthMiddleware;
 ///
-/// The dispatcher implementation delegates to `SessionManager` and
-/// `DatabaseAdapter` methods — same logic as HTTP handlers.
+/// let middleware = VoxAuthMiddleware::new(
+///     auth.session_manager().clone(),
+///     auth.database().clone(),
+/// );
+/// let dispatcher = MyServiceDispatcher::new(service)
+///     .with_middleware(middleware);
+/// ```
+#[cfg(feature = "vox")]
+pub struct VoxAuthMiddleware<DB: DatabaseAdapter> {
+    session_manager: better_auth_core::session::SessionManager<DB>,
+    database: std::sync::Arc<DB>,
+}
+
+#[cfg(feature = "vox")]
+impl<DB: DatabaseAdapter> VoxAuthMiddleware<DB> {
+    pub fn new(
+        session_manager: better_auth_core::session::SessionManager<DB>,
+        database: std::sync::Arc<DB>,
+    ) -> Self {
+        Self {
+            session_manager,
+            database,
+        }
+    }
+}
+
+#[cfg(feature = "vox")]
+impl<DB: DatabaseAdapter> vox_types::ServerMiddleware for VoxAuthMiddleware<DB> {
+    fn pre<'a>(
+        &'a self,
+        context: &'a vox_types::RequestContext<'a>,
+    ) -> vox_types::BoxMiddlewareFuture<'a> {
+        Box::pin(async move {
+            // Look for an authorization token in request metadata.
+            let token = context
+                .metadata()
+                .iter()
+                .find(|entry| entry.key == "authorization")
+                .and_then(|entry| {
+                    if let vox_types::MetadataValue::String(value) = &entry.value {
+                        let v = value.strip_prefix("Bearer ").unwrap_or(value);
+                        Some(v.to_string())
+                    } else {
+                        None
+                    }
+                });
+
+            let Some(token) = token else {
+                return; // No token — unauthenticated request
+            };
+
+            // Validate session
+            let session = match self.session_manager.get_session(&token).await {
+                Ok(Some(session)) => session,
+                _ => return, // Invalid/expired token
+            };
+
+            // Look up user
+            use better_auth_core::adapters::UserOps as _;
+            use better_auth_core::entity::AuthSession as _;
+            let user_id = session.user_id().to_string();
+            let user = match self.database.get_user_by_id(&user_id).await {
+                Ok(Some(user)) => user,
+                _ => return,
+            };
+
+            // Inject authenticated user into extensions
+            let authenticated = AuthenticatedUser {
+                user_id: AuthUser::id(&user).to_string(),
+                email: AuthUser::email(&user).map(|s| s.to_string()),
+                name: AuthUser::name(&user).map(|s| s.to_string()),
+                username: AuthUser::username(&user).map(|s| s.to_string()),
+                role: AuthUser::role(&user).map(|s| s.to_string()),
+                session_token: token,
+                active_organization_id: session.active_organization_id().map(|s| s.to_string()),
+            };
+            context.extensions().insert(authenticated);
+        })
+    }
+}
+
+// ── Vox RPC Response Types ──────────────────────────────────────────────────
+
+/// Response from sign-in/sign-up/get-session operations.
 pub mod service {
     use serde::{Deserialize, Serialize};
 

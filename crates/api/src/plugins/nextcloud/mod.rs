@@ -123,9 +123,7 @@ pub fn authelia_provider(config: AutheliaProviderConfig) -> super::oauth::OAuthP
 /// ```json
 /// { "ocs": { "data": { "id": "user1", "email": "...", "displayname": "..." } } }
 /// ```
-fn map_nextcloud_user(
-    value: serde_json::Value,
-) -> Result<super::oauth::OAuthUserInfo, String> {
+fn map_nextcloud_user(value: serde_json::Value) -> Result<super::oauth::OAuthUserInfo, String> {
     let data = value
         .get("ocs")
         .and_then(|o| o.get("data"))
@@ -146,7 +144,7 @@ fn map_nextcloud_user(
             .get("displayname")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        image: None, // Nextcloud avatar is at /avatar/{userId}/64
+        image: None,          // Nextcloud avatar is at /avatar/{userId}/64
         email_verified: true, // Nextcloud users are always verified
     })
 }
@@ -154,9 +152,7 @@ fn map_nextcloud_user(
 /// Map standard OIDC userinfo response to OAuthUserInfo.
 ///
 /// Works with Authelia, Keycloak, Auth0, etc.
-fn map_oidc_user(
-    value: serde_json::Value,
-) -> Result<super::oauth::OAuthUserInfo, String> {
+fn map_oidc_user(value: serde_json::Value) -> Result<super::oauth::OAuthUserInfo, String> {
     Ok(super::oauth::OAuthUserInfo {
         id: value
             .get("sub")

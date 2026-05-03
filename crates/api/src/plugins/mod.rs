@@ -4,7 +4,9 @@ pub mod api_key;
 pub mod device_authorization;
 pub mod email_password;
 pub mod email_verification;
+pub mod ghost_user;
 pub mod helpers;
+pub mod nextcloud;
 pub mod oauth;
 pub mod organization;
 pub mod passkey;
@@ -13,7 +15,6 @@ pub mod session_management;
 pub mod two_factor;
 pub mod user_management;
 pub mod vox_rpc;
-pub mod nextcloud;
 
 use serde::{Deserialize, Serialize};
 
@@ -164,6 +165,10 @@ pub use email_password::{EmailPasswordConfig, EmailPasswordPlugin};
 pub use email_verification::{
     EmailVerificationConfig, EmailVerificationHook, EmailVerificationPlugin, SendVerificationEmail,
 };
+pub use ghost_user::{GhostStatus, GhostUser, GhostUserPlugin};
+pub use nextcloud::{
+    AutheliaProviderConfig, NextcloudProviderConfig, authelia_provider, nextcloud_provider,
+};
 pub use organization::{OrganizationConfig, OrganizationPlugin};
 pub use passkey::{PasskeyConfig, PasskeyPlugin};
 pub use password_management::{
@@ -174,8 +179,6 @@ pub use two_factor::{TwoFactorConfig, TwoFactorPlugin};
 pub use user_management::{
     ChangeEmailConfig, DeleteUserConfig, UserManagementConfig, UserManagementPlugin,
 };
-pub use vox_rpc::{VoxRpcConfig, VoxRpcPlugin};
-pub use nextcloud::{
-    NextcloudProviderConfig, AutheliaProviderConfig,
-    nextcloud_provider, authelia_provider,
-};
+#[cfg(feature = "vox")]
+pub use vox_rpc::VoxAuthMiddleware;
+pub use vox_rpc::{AuthenticatedUser, VoxRpcConfig, VoxRpcPlugin};
